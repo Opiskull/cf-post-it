@@ -73,7 +73,65 @@ export class Board {
       users: [this.sessions.map(_ => _.name)]
     };
 
-    session.sendMessage({ type: 'newSession', name: session.name, board });
+    session.sendMessage('newSession', { name: session.name, board });
+
+    const handlers = new Map<string, (payload: any) => Promise<void>>();
+
+    handlers.set('addPost', async ({ post }: { post: Post }) => {
+      post.id = `${Date.now()}`;
+      this.posts.set(`post.${post.id}`, post);
+      await this.state.storage.put(`post.${post.id}`, post);
+      this.broadcast('addPost', { post });
+    });
+    handlers.set('updatePost', async ({ post }: { post: Post }) => {
+      this.posts.set(`post.${post.id}`, post);
+      await this.state.storage.put(`post.${post.id}`, post);
+      this.broadcast('updatePost', { post });
+    });
+    handlers.set('deletePost', async ({ postId }: { postId: Number }) => {
+      this.posts.delete(`post.${postId}`);
+      await this.state.storage.delete(`post.${postId}`);
+      this.broadcast('deletePost', { postId });
+    });
+    handlers.set('config', async ({}) => {
+      const board = {
+        posts: Array.from(this.posts.values()),
+        config: this.config,
+        users: [this.sessions.map(_ => _.name)]
+      };
+      session.sendMessage('config', { board });
+    });
+    handlers.set('setName', async (data: { name: string }) => {
+      let name: string = data.name;
+      if (this.sessions.find(_ => _.name === name)) {
+        session.sendError(`name ${name} already in use`);
+      } else {
+        const oldName = session.name;
+        const newName = name;
+        session.name = newName;
+        this.broadcast('nameChanged', { oldName, newName });
+      }
+    });
+    handlers.set('users', async (data: any) => {
+      session.sendMessage('users', {
+        users: [this.sessions.map(_ => _.name)]
+      });
+    });
+
+    handlers.set('setOwner', async (data: { owner: string }) => {
+      if (this.config?.owner) {
+        session.sendError(`can only be owner when no owner exists`);
+      } else {
+        let oldOwner = this.config?.owner;
+        let newOwner = data.owner;
+        if (this.config) {
+          this.config.owner = newOwner;
+        }
+        await this.state.storage.put('config', this.config);
+
+        this.broadcast('ownerChanged', { oldOwner, newOwner });
+      }
+    });
 
     websocket.addEventListener('message', async msg => {
       try {
@@ -83,63 +141,11 @@ export class Board {
         }
 
         const data = JSON.parse(msg.data);
-
-        switch (data.type) {
-          case 'set':
-            let post: Post = data.post;
-            if (!post.id) {
-              let id: string = `${Date.now()}`;
-              post.id = id;
-            }
-            this.posts.set(`post.${post.id}`, post);
-            await this.state.storage.put(`post.${post.id}`, post);
-            this.broadcast({ type: 'set', post });
-            break;
-          case 'delete':
-            const postId = data.post.id;
-            this.posts.delete(`post.${postId}`);
-            await this.state.storage.delete(`post.${postId}`);
-            this.broadcast({ type: 'delete', postId });
-            break;
-          case 'config':
-            const board = {
-              posts: Array.from(this.posts?.values()),
-              config: this.config,
-              users: [this.sessions.map(_ => _.name)]
-            };
-            session.sendMessage({ type: 'config', board });
-            break;
-          case 'setName':
-            let name: string = data.name;
-            if (this.sessions.find(_ => _.name === name)) {
-              session.sendError(`name ${name} already in use`);
-            } else {
-              const oldName = session.name;
-              const newName = name;
-              session.name = newName;
-              this.broadcast({ type: 'nameChanged', oldName, newName });
-            }
-            break;
-          case 'users':
-            session.sendMessage({
-              type: 'users',
-              users: [this.sessions.map(_ => _.name)]
-            });
-            break;
-          case 'setOwner':
-            if (this.config?.owner) {
-              session.sendError(`can only be owner when no owner exists`);
-            } else {
-              let oldOwner = this.config?.owner;
-              let newOwner = data.owner;
-              if (this.config) {
-                this.config.owner = newOwner;
-              }
-              await this.state.storage.put('config', this.config);
-
-              this.broadcast({ type: 'ownerChanged', oldOwner, newOwner });
-            }
-            break;
+        if (handlers.has(data.type)) {
+          const handler = handlers.get(data.type);
+          if (handler) {
+            await handler(data.payload);
+          }
         }
       } catch (err) {
         session.sendError('an error occurred', err.stack);
@@ -150,24 +156,19 @@ export class Board {
       session.quit = true;
       this.sessions = this.sessions.filter(member => member !== session);
       if (session.name) {
-        this.broadcast({ type: 'quit', name: session.name });
+        this.broadcast('quit', { name: session.name });
       }
     };
     websocket.addEventListener('close', closeOrErrorHandler);
     websocket.addEventListener('error', closeOrErrorHandler);
   }
 
-  private broadcast(message: any) {
-    // Apply JSON if we weren't given a string to start with.
-    if (typeof message !== 'string') {
-      message = JSON.stringify(message);
-    }
-
+  private broadcast(type: string, payload?: any) {
     // Iterate over all the sessions sending them messages.
     let quitters: Session[] = [];
     this.sessions = this.sessions.filter(session => {
       try {
-        session.sendMessage(message);
+        session.sendMessage(type, payload);
         return true;
       } catch (err) {
         // Whoops, this connection is dead. Remove it from the list and arrange to notify
@@ -179,7 +180,7 @@ export class Board {
     });
 
     quitters.forEach(quitter => {
-      this.broadcast({ type: 'quit', name: quitter.name });
+      this.broadcast('quit', { name: quitter.name });
     });
   }
 }

@@ -4,14 +4,11 @@ export class Session {
 
   constructor(private webSocket: WebSocket) {}
 
-  public sendMessage(message: any): void {
-    const jsonMessage =
-      typeof message !== 'string' ? JSON.stringify(message) : message;
-
-    this.webSocket.send(jsonMessage);
+  public sendMessage(type: string, payload: any) {
+    this.webSocket.send(JSON.stringify({ type, payload }));
   }
 
   public sendError(message: string, stacktrace?: string) {
-    this.sendMessage({ type: 'error', message: message, stack: stacktrace });
+    this.sendMessage('error', { message: message, stack: stacktrace });
   }
 }
