@@ -57,41 +57,41 @@ export class Board {
       default:
         return new Response('Not found', { status: 404 });
     }
-    return new Response("THAT WASN't planned");
   }
 
-  private async handleSession(websocket: WebSocket) {
+  private handleSession = async (websocket: WebSocket) => {
     (websocket as any).accept();
 
     const session = new Session(websocket);
 
     this.sessions.push(session);
 
-    const board = {
-      posts: Array.from(this.posts?.values()),
-      config: this.config,
-      users: [this.sessions.map(_ => _.name)]
-    };
-
-    session.sendMessage('newSession', { name: session.name, board });
+    session.sendMessage('newSession', {
+      name: session.name,
+      board: {
+        posts: Array.from(this.posts?.values()),
+        config: this.config,
+        users: [this.sessions.map(_ => _.name)]
+      }
+    });
 
     const handlers = new Map<string, (payload: any) => Promise<void>>();
 
-    handlers.set('addPost', async ({ post }: { post: Post }) => {
+    handlers.set('post/addPost', async (post: Post) => {
       post.id = `${Date.now()}`;
       this.posts.set(`post.${post.id}`, post);
       await this.state.storage.put(`post.${post.id}`, post);
-      this.broadcast('addPost', { post });
+      this.broadcast('post/addPost', post);
     });
-    handlers.set('updatePost', async ({ post }: { post: Post }) => {
+    handlers.set('post/updatePost', async (post: Post) => {
       this.posts.set(`post.${post.id}`, post);
       await this.state.storage.put(`post.${post.id}`, post);
-      this.broadcast('updatePost', { post });
+      this.broadcastSkipSender(session, 'post/updatePost', post);
     });
-    handlers.set('deletePost', async ({ postId }: { postId: Number }) => {
+    handlers.set('post/deletePost', async (postId: string) => {
       this.posts.delete(`post.${postId}`);
       await this.state.storage.delete(`post.${postId}`);
-      this.broadcast('deletePost', { postId });
+      this.broadcast('post/deletePost', postId);
     });
     handlers.set('config', async ({}) => {
       const board = {
@@ -161,6 +161,29 @@ export class Board {
     };
     websocket.addEventListener('close', closeOrErrorHandler);
     websocket.addEventListener('error', closeOrErrorHandler);
+  };
+
+  private broadcastSkipSender(sender: Session, type: string, payload?: any) {
+    // Iterate over all the sessions sending them messages.
+    let quitters: Session[] = [];
+    this.sessions = this.sessions.filter(session => {
+      try {
+        if (session !== sender) {
+          session.sendMessage(type, payload);
+        }
+        return true;
+      } catch (err) {
+        // Whoops, this connection is dead. Remove it from the list and arrange to notify
+        // everyone below.
+        session.quit = true;
+        quitters.push(session);
+        return false;
+      }
+    });
+
+    quitters.forEach(quitter => {
+      this.broadcast('quit', { name: quitter.name });
+    });
   }
 
   private broadcast(type: string, payload?: any) {
